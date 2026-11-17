@@ -71,7 +71,7 @@ struct ContentView: View {
                         .frame(height: 150)
                 }
                 .padding(.horizontal, 22)
-                .padding(.top, 50)
+                .padding(.top, 12)
             }
 
             bottomBar
@@ -184,7 +184,7 @@ struct ContentView: View {
             }
 
             HStack(spacing: 7) {
-                ForEach([1, 2, 3, 4, 5, 6, 10], id: \.self) { halfDays in
+                ForEach([1, 2, 3, 4, 5, 6, 14], id: \.self) { halfDays in
                     chip(halfDays: halfDays)
                 }
             }
@@ -309,41 +309,48 @@ struct ContentView: View {
     }
 
     private func timeSheet(for slot: MedSlot) -> some View {
-        NavigationStack {
-            VStack {
-                DatePicker(
-                    "",
-                    selection: $draftTime,
-                    displayedComponents: .hourAndMinute
-                )
-                .datePickerStyle(.wheel)
-                .labelsHidden()
-                .environment(\.locale, Locale(identifier: "en_GB"))
-                .colorScheme(.dark)
+        VStack(spacing: 0) {
+            HStack {
+                Button("取消") { editingSlot = nil }
+                    .font(.system(size: 15))
+                    .foregroundStyle(.white.opacity(0.55))
                 Spacer()
-            }
-            .padding(.top, 8)
-            .background(Color(red: 0.07, green: 0.07, blue: 0.1).ignoresSafeArea())
-            .navigationTitle(slot == .morning ? "早上提醒时间" : "晚上提醒时间")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { editingSlot = nil }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("确定") {
-                        if slot == .morning {
-                            scheduler.morningMinutes = minutes(of: draftTime)
-                        } else {
-                            scheduler.eveningMinutes = minutes(of: draftTime)
-                        }
-                        editingSlot = nil
+                Text(slot == .morning ? "早上提醒时间" : "晚上提醒时间")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
+                Spacer()
+                Button("确定") {
+                    if slot == .morning {
+                        scheduler.morningMinutes = minutes(of: draftTime)
+                    } else {
+                        scheduler.eveningMinutes = minutes(of: draftTime)
                     }
-                    .fontWeight(.semibold)
+                    editingSlot = nil
                 }
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.orange)
             }
+            .padding(.horizontal, 20)
+            .padding(.top, 16)
+
+            DatePicker(
+                "",
+                selection: $draftTime,
+                displayedComponents: .hourAndMinute
+            )
+            .datePickerStyle(.wheel)
+            .labelsHidden()
+            .environment(\.locale, Locale(identifier: "en_GB"))
+            .frame(height: 190)
+            .padding(.top, 2)
+
+            Spacer(minLength: 0)
         }
-        .presentationDetents([.height(340)])
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(Color(red: 0.09, green: 0.09, blue: 0.13))
+        .presentationDetents([.height(276)])
+        .presentationDragIndicator(.visible)
+        .preferredColorScheme(.dark)
     }
 
     private func anchorUsage(_ slot: MedSlot) -> String {
