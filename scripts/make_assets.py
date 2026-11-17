@@ -66,21 +66,28 @@ with wave.open(os.path.join(APP_DIR, "alarm.wav"), "wb") as w:
 print("wav", os.path.getsize(os.path.join(APP_DIR, "alarm.wav")), "bytes")
 
 # ---------------------------------------------------------------- app icon
-# Pure-python PNG writer with soft-edged geometry (no PIL needed).
+# Pure-python PNG writer: pill capsule + medical cross badge on dark bg.
 S = 1024
-CX, CY = S * 0.5, S * 0.54
-R = S * 0.285          # clock face radius
-RING_W = S * 0.062     # ring thickness
-BELL_R = S * 0.085
-HAND_W = S * 0.028
-DOT_R = S * 0.042
+CX, CY = S * 0.47, S * 0.47
+PILL_HALF = S * 0.30      # capsule half-length along its axis
+PILL_R = S * 0.165        # capsule radius
+BADGE_X, BADGE_Y, BADGE_R = S * 0.78, S * 0.80, S * 0.135
+CROSS_W = S * 0.048
+CROSS_L = S * 0.125
 
 TOP = (26, 26, 34)
 BOTTOM = (7, 7, 9)
 ORANGE = (255, 138, 56)
-HILITE = (255, 196, 130)
+ORANGE_D = (224, 106, 28)
 WHITE = (255, 255, 255)
 GLOW_RGB = (255, 110, 40)
+
+# capsule axis tilted 35 degrees (upper-right to lower-left)
+ANG = math.radians(-35)
+AX, AY = math.cos(ANG), math.sin(ANG)
+A = (CX - PILL_HALF * AX, CY - PILL_HALF * AY)
+B = (CX + PILL_HALF * AX, CY + PILL_HALF * AY)
+MID = ((A[0] + B[0]) / 2.0, (A[1] + B[1]) / 2.0)
 
 
 def seg_dist(px, py, ax, ay, bx, by):
@@ -99,7 +106,6 @@ rows = []
 for y in range(S):
     t = y / (S - 1)
     row = bytearray([0])  # PNG filter type 0
-    dy2 = (y - CY) ** 2
     dyg2 = (y - CY) ** 2
     for x in range(S):
         # background gradient
@@ -107,48 +113,52 @@ for y in range(S):
         g = TOP[1] + (BOTTOM[1] - TOP[1]) * t
         b = TOP[2] + (BOTTOM[2] - TOP[2]) * t
 
-        # warm glow behind the clock
-        dist = math.sqrt((x - CX) ** 2 + dyg2) / (S * 0.55)
+        # warm glow
+        dist = math.sqrt((x - CX) ** 2 + dyg2) / (S * 0.58)
         glow = clamp01(1.0 - dist) ** 2 * 0.18
         r += GLOW_RGB[0] * glow
         g += GLOW_RGB[1] * glow
         b += GLOW_RGB[2] * glow
 
-        # clock ring (soft edge)
-        dc = math.sqrt((x - CX) ** 2 + dy2)
-        half = RING_W / 2
-        a = clamp01(half + 0.5 - abs(dc - R))
+        # pill capsule, split along its axis: orange half / white half
+        d = seg_dist(x, y, A[0], A[1], B[0], B[1])
+        a = clamp01(PILL_R + 0.5 - d)
         if a > 0:
-            r = r * (1 - a) + ORANGE[0] * a
-            g = g * (1 - a) + ORANGE[1] * a
-            b = b * (1 - a) + ORANGE[2] * a
+            along = (x - MID[0]) * AX + (y - MID[1]) * AY
+            if along >= 0:
+                base = WHITE
+            else:
+                # subtle shading on the orange half for depth
+                shade = clamp01(0.5 + along / (PILL_HALF * 2.0) * 0.35 + 0.15)
+                base = (
+                    ORANGE_D[0] + (ORANGE[0] - ORANGE_D[0]) * shade,
+                    ORANGE_D[1] + (ORANGE[1] - ORANGE_D[1]) * shade,
+                    ORANGE_D[2] + (ORANGE[2] - ORANGE_D[2]) * shade,
+                )
+            r = r * (1 - a) + base[0] * a
+            g = g * (1 - a) + base[1] * a
+            b = b * (1 - a) + base[2] * a
 
-        # inner highlight ring
-        a2 = clamp01(RING_W * 0.09 + 0.5 - abs(dc - (R - RING_W * 0.62)))
-        if a2 > 0:
-            alpha = a2 * (90 / 255)
-            r = r * (1 - alpha) + HILITE[0] * alpha
-            g = g * (1 - alpha) + HILITE[1] * alpha
-            b = b * (1 - alpha) + HILITE[2] * alpha
-
-        # bells on top
-        for sign in (-1, 1):
-            bx = CX + sign * S * 0.165
-            by = CY - R * 0.72
-            ab = clamp01(BELL_R + 0.5 - math.sqrt((x - bx) ** 2 + (y - by) ** 2))
-            if ab > 0:
-                r = r * (1 - ab) + ORANGE[0] * ab
-                g = g * (1 - ab) + ORANGE[1] * ab
-                b = b * (1 - ab) + ORANGE[2] * ab
-
-        # hands and center dot
-        ah = clamp01(HAND_W / 2 + 0.5 - seg_dist(x, y, CX, CY, CX, CY - R * 0.60))
-        ah = max(ah, clamp01(HAND_W / 2 + 0.5 - seg_dist(x, y, CX, CY, CX + R * 0.44, CY + R * 0.20)))
-        ah = max(ah, clamp01(DOT_R + 0.5 - math.sqrt((x - CX) ** 2 + (y - CY) ** 2)))
-        if ah > 0:
-            r = r * (1 - ah) + WHITE[0] * ah
-            g = g * (1 - ah) + WHITE[1] * ah
-            b = b * (1 - ah) + WHITE[2] * ah
+        # medical cross badge (bottom-right, on top)
+        ab = clamp01(BADGE_R + 0.5 - math.sqrt((x - BADGE_X) ** 2 + (y - BADGE_Y) ** 2))
+        if ab > 0:
+            r = r * (1 - ab) + ORANGE[0] * ab
+            g = g * (1 - ab) + ORANGE[1] * ab
+            b = b * (1 - ab) + ORANGE[2] * ab
+            ah = max(
+                clamp01(CROSS_W / 2 + 0.5 - seg_dist(
+                    x, y,
+                    BADGE_X - CROSS_L / 2, BADGE_Y,
+                    BADGE_X + CROSS_L / 2, BADGE_Y)),
+                clamp01(CROSS_W / 2 + 0.5 - seg_dist(
+                    x, y,
+                    BADGE_X, BADGE_Y - CROSS_L / 2,
+                    BADGE_X, BADGE_Y + CROSS_L / 2)),
+            )
+            if ah > 0:
+                r = r * (1 - ah) + WHITE[0] * ah
+                g = g * (1 - ah) + WHITE[1] * ah
+                b = b * (1 - ah) + WHITE[2] * ah
 
         row += bytes((int(r) & 0xFF, int(g) & 0xFF, int(b) & 0xFF))
     rows.append(bytes(row))
