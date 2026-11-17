@@ -6,6 +6,8 @@ struct ContentView: View {
 
     @State private var showCalibration = false
     @State private var showPlan = false
+    @State private var editingSlot: MedSlot?
+    @State private var draftTime = Date()
 
     var body: some View {
         ZStack {
@@ -227,20 +229,23 @@ struct ContentView: View {
                 icon: "sun.max.fill", tint: .orange,
                 title: "早上",
                 usage: anchorUsage(.morning),
-                binding: morningBinding
+                slot: .morning
             )
             timeRow(
                 icon: "moon.fill", tint: Color(red: 0.56, green: 0.64, blue: 1),
                 title: "晚上",
                 usage: anchorUsage(.evening),
-                binding: eveningBinding
+                slot: .evening
             )
         }
         .cardStyle()
+        .sheet(item: $editingSlot) { slot in
+            timeSheet(for: slot)
+        }
     }
 
-    private func timeRow(icon: String, tint: Color, title: String, usage: String, binding: Binding<Date>) -> some View {
-        HStack {
+    private func timeRow(icon: String, tint: Color, title: String, usage: String, slot: MedSlot) -> some View {
+        HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
                     .font(.system(size: 14, weight: .medium))
@@ -249,36 +254,78 @@ struct ContentView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.white.opacity(0.4))
             }
-            Spacer()
-            Image(systemName: icon)
-                .font(.system(size: 12))
-                .foregroundStyle(tint)
-                .padding(.trailing, 8)
-            DatePicker("", selection: binding, displayedComponents: .hourAndMinute)
-                .datePickerStyle(.compact)
-                .labelsHidden()
-                .tint(.white)
+            Spacer(minLength: 8)
+            Button {
+                draftTime = scheduler.anchorDate(for: slot)
+                editingSlot = slot
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: icon)
+                        .font(.system(size: 11))
+                        .foregroundStyle(tint)
+                    Text(timeText(scheduler.anchorDate(for: slot)))
+                        .font(.system(size: 19, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.white)
+                }
+                .frame(width: 108, alignment: .center)
+                .padding(.vertical, 9)
+                .background(
+                    Color.white.opacity(0.1),
+                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                )
+            }
+            .buttonStyle(.plain)
         }
         .padding(.vertical, 8)
+    }
+
+    private func timeText(_ date: Date) -> String {
+        let comps = Calendar.current.dateComponents([.hour, .minute], from: date)
+        return String(format: "%02d:%02d", comps.hour ?? 0, comps.minute ?? 0)
+    }
+
+    private func timeSheet(for slot: MedSlot) -> some View {
+        NavigationStack {
+            VStack {
+                DatePicker(
+                    "",
+                    selection: $draftTime,
+                    displayedComponents: .hourAndMinute
+                )
+                .datePickerStyle(.wheel)
+                .labelsHidden()
+                .environment(\.locale, Locale(identifier: "en_GB"))
+                .colorScheme(.dark)
+                Spacer()
+            }
+            .padding(.top, 8)
+            .background(Color(red: 0.07, green: 0.07, blue: 0.1).ignoresSafeArea())
+            .navigationTitle(slot == .morning ? "早上提醒时间" : "晚上提醒时间")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { editingSlot = nil }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("确定") {
+                        if slot == .morning {
+                            scheduler.morningMinutes = minutes(of: draftTime)
+                        } else {
+                            scheduler.eveningMinutes = minutes(of: draftTime)
+                        }
+                        editingSlot = nil
+                    }
+                    .fontWeight(.semibold)
+                }
+            }
+        }
+        .presentationDetents([.height(340)])
     }
 
     private func anchorUsage(_ slot: MedSlot) -> String {
         if scheduler.isTwiceDaily || scheduler.isAlternating { return "使用中" }
         return scheduler.lastDoseSlot == slot ? "使用中" : "不使用"
-    }
-
-    private var morningBinding: Binding<Date> {
-        Binding(
-            get: { scheduler.anchorDate(for: .morning) },
-            set: { scheduler.morningMinutes = minutes(of: $0) }
-        )
-    }
-
-    private var eveningBinding: Binding<Date> {
-        Binding(
-            get: { scheduler.anchorDate(for: .evening) },
-            set: { scheduler.eveningMinutes = minutes(of: $0) }
-        )
     }
 
     private func minutes(of date: Date) -> Int {
@@ -347,6 +394,7 @@ struct ContentView: View {
                 )
                 .datePickerStyle(.compact)
                 .labelsHidden()
+                .environment(\.locale, Locale(identifier: "zh_CN"))
                 .tint(.white)
 
                 HStack(spacing: 3) {

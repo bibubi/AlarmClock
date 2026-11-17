@@ -15,9 +15,10 @@ struct AlarmMetadataPayload: AlarmMetadata {}
 
 // MARK: - Model
 
-enum MedSlot: String, Codable {
+enum MedSlot: String, Codable, Identifiable {
     case morning, evening
 
+    var id: String { rawValue }
     var label: String { self == .morning ? "早上" : "晚上" }
     var shortLabel: String { self == .morning ? "早" : "晚" }
 
