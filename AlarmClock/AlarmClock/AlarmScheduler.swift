@@ -50,6 +50,7 @@ final class AlarmScheduler: ObservableObject {
     static let preScheduleCount = 32          // 提前预排的剂次数量
     static let activeRingGrace: TimeInterval = 2 * 3600   // 打开 App 时补响铃的时限
     static let recordRetention: TimeInterval = 7 * 24 * 3600
+    static let defaultEveningMinutes = 22 * 60 + 30
 
     private enum Keys {
         static let interval = "med.intervalHalfDays"
@@ -106,7 +107,7 @@ final class AlarmScheduler: ObservableObject {
         let interval = defaults.object(forKey: Keys.interval) as? Int ?? 2
         intervalHalfDays = min(14, max(1, interval))
         morningMinutes = defaults.object(forKey: Keys.morningMinutes) as? Int ?? 7 * 60 + 30
-        eveningMinutes = defaults.object(forKey: Keys.eveningMinutes) as? Int ?? 22 * 60 + 30
+        eveningMinutes = defaults.object(forKey: Keys.eveningMinutes) as? Int ?? Self.defaultEveningMinutes
         lastDoseSlot = MedSlot(rawValue: defaults.string(forKey: Keys.lastDoseSlot) ?? "") ?? .evening
 
         if let stored = defaults.object(forKey: Keys.lastDoseDate) as? Date {
@@ -115,7 +116,7 @@ final class AlarmScheduler: ObservableObject {
             // 默认校准：昨天晚上（常见场景）
             var day = Calendar.current.date(byAdding: .day, value: -1, to: Date()) ?? Date()
             day = Calendar.current.startOfDay(for: day)
-            let m = eveningMinutes
+            let m = Self.defaultEveningMinutes
             lastDoseDate = Calendar.current.date(
                 byAdding: DateComponents(minute: m),
                 to: day
