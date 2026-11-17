@@ -157,7 +157,11 @@ final class AlarmScheduler: ObservableObject {
 
         let alert = AlarmPresentation.Alert(
             title: "闹钟时间到了",
-            stopButton: .stopButton,
+            stopButton: AlarmButton(
+                text: "停止",
+                textColor: .white,
+                systemImageName: "stop.circle"
+            ),
             secondaryButton: nil,
             secondaryButtonBehavior: nil
         )
