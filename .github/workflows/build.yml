@@ -5,6 +5,9 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-26
@@ -68,3 +71,13 @@ jobs:
           name: AlarmClock-ipa
           path: AlarmClock.ipa
           if-no-files-found: error
+
+      - name: Publish ipa to release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ipa-build-${{ github.run_number }}
+          name: AlarmClock ipa build ${{ github.run_number }}
+          body: Unsigned ipa built from ${{ github.sha }}. Download AlarmClock.ipa below and sideload it.
+          files: AlarmClock.ipa
+          fail_on_unmatched_files: true
