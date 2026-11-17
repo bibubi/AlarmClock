@@ -492,9 +492,8 @@ final class AlarmScheduler: ObservableObject {
     }
 
     static func timeText(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm"
-        return f.string(from: date)
+        let comps = Calendar.current.dateComponents([.hour, .minute], from: date)
+        return String(format: "%02d:%02d", comps.hour ?? 0, comps.minute ?? 0)
     }
 
     static func weekdayText(_ date: Date) -> String {
