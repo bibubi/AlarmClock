@@ -24,6 +24,7 @@ jobs:
 
       - name: Build app (unsigned, device)
         run: |
+          set +e
           xcodebuild \
             -project AlarmClock.xcodeproj \
             -scheme AlarmClock \
@@ -32,10 +33,25 @@ jobs:
             -destination 'generic/platform=iOS' \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
-            CODE_SIGN_ENTITLEMENTS="" \
-            -derivedDataPath build
+            -derivedDataPath build > build_raw.log 2>&1
+          STATUS=$?
+          grep -E "error: " build_raw.log | sort -u | head -30 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          echo "===== tail of build log ====="
+          tail -60 build_raw.log
+          exit $STATUS
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build_raw.log
+          if-no-files-found: ignore
 
       - name: Package ipa
+        if: success()
         run: |
           APP_PATH="build/Build/Products/Release-iphoneos/AlarmClock.app"
           test -d "$APP_PATH"
@@ -46,6 +62,7 @@ jobs:
           ls -lh AlarmClock.ipa
 
       - name: Upload ipa artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: AlarmClock-ipa
