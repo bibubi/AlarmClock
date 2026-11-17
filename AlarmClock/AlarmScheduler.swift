@@ -9,161 +9,327 @@ import UserNotifications
 import AlarmKit
 #endif
 
-/// AlarmKit only needs metadata for the Live Activity UI, so an empty payload is enough.
 #if canImport(AlarmKit)
 struct AlarmMetadataPayload: AlarmMetadata {}
 #endif
 
-enum ScheduleError: LocalizedError {
-    case notificationsDenied
+// MARK: - Model
 
-    var errorDescription: String? {
-        switch self {
-        case .notificationsDenied:
-            return "通知权限被拒绝，请到「设置 → 秒闹钟 → 通知」中允许通知。"
-        }
+enum MedSlot: String, Codable, Identifiable {
+    case morning, evening
+
+    var id: String { rawValue }
+    var label: String { self == .morning ? "早上" : "晚上" }
+    var shortLabel: String { self == .morning ? "早" : "晚" }
+
+    func flipped() -> MedSlot { self == .morning ? .evening : .morning }
+}
+
+struct PlannedDose: Codable, Equatable, Identifiable {
+    var date: Date
+    var slot: MedSlot
+
+    var id: String { PlannedDose.doseId(for: date, slot: slot) }
+
+    static func doseId(for date: Date, slot: MedSlot) -> String {
+        "\(Int(date.timeIntervalSince1970))-\(slot.rawValue)"
     }
 }
+
+enum DoseAction: String {
+    case taken, skipped
+
+    var label: String { self == .taken ? "已服用" : "已跳过" }
+}
+
+// MARK: - Scheduler
 
 @MainActor
 final class AlarmScheduler: ObservableObject {
     static let shared = AlarmScheduler()
 
+    static let preScheduleCount = 32          // 提前预排的剂次数量
+    static let activeRingGrace: TimeInterval = 2 * 3600   // 打开 App 时补响铃的时限
+    static let recordRetention: TimeInterval = 7 * 24 * 3600
+    static let defaultEveningMinutes = 22 * 60 + 30
+
     private enum Keys {
-        static let fireDate = "alarm.fireDate"
-        static let usesSystemAlarm = "alarm.usesSystemAlarm"
-        static let alarmKitID = "alarm.alarmKitID"
+        static let interval = "med.intervalHalfDays"
+        static let morningMinutes = "med.morningMinutes"
+        static let eveningMinutes = "med.eveningMinutes"
+        static let lastDoseDate = "med.lastDoseDate"
+        static let lastDoseSlot = "med.lastDoseSlot"
+        static let isRunning = "med.isRunning"
+        static let plan = "med.plan"
+        static let alarmIDs = "med.alarmIDs"
+        static let records = "med.records"
     }
 
-    private static let notificationID = "alarmclock.local"
+    // MARK: settings（修改后自动重建计划）
 
-    @Published private(set) var fireDate: Date?
+    @Published var intervalHalfDays: Int {
+        didSet { persist(); scheduleRebuild() }
+    }
+    @Published var morningMinutes: Int {
+        didSet { persist(); scheduleRebuild() }
+    }
+    @Published var eveningMinutes: Int {
+        didSet { persist(); scheduleRebuild() }
+    }
+    @Published var lastDoseDate: Date {
+        didSet { persist(); scheduleRebuild() }
+    }
+    @Published var lastDoseSlot: MedSlot {
+        didSet { persist(); scheduleRebuild() }
+    }
+    @Published private(set) var isRunning: Bool
+
+    // MARK: runtime state
+
+    @Published private(set) var plan: [PlannedDose] = []
     @Published private(set) var isRinging = false
+    @Published private(set) var ringingDose: PlannedDose?
+    @Published private(set) var usesSystemAlarm = false
     @Published private(set) var scheduleDescription = ""
     @Published private(set) var errorMessage: String?
 
-    private var alarmKitID: UUID?
+    private var records: [String: String] = [:]
+    private var alarmIDs: [String: String] = [:]   // doseId -> AlarmKit UUID
     private var monitor: Timer?
     private var player: AVAudioPlayer?
-    private var usesSystemAlarm = false
+    private var rebuildTask: Task<Void, Never>?
+    private var rebuildGeneration = 0
+
+    private let defaults = UserDefaults.standard
+
+    // MARK: init
 
     private init() {
-        if let raw = UserDefaults.standard.string(forKey: Keys.alarmKitID) {
-            alarmKitID = UUID(uuidString: raw)
-        }
+        let interval = defaults.object(forKey: Keys.interval) as? Int ?? 2
+        intervalHalfDays = min(14, max(1, interval))
+        morningMinutes = defaults.object(forKey: Keys.morningMinutes) as? Int ?? 7 * 60 + 30
+        eveningMinutes = defaults.object(forKey: Keys.eveningMinutes) as? Int ?? Self.defaultEveningMinutes
+        lastDoseSlot = MedSlot(rawValue: defaults.string(forKey: Keys.lastDoseSlot) ?? "") ?? .evening
 
-        if let stored = UserDefaults.standard.object(forKey: Keys.fireDate) as? Date {
-            if stored > Date() {
-                fireDate = stored
-                usesSystemAlarm = UserDefaults.standard.bool(forKey: Keys.usesSystemAlarm)
-                scheduleDescription = "已设定"
-                startMonitor()
-            } else {
-                UserDefaults.standard.removeObject(forKey: Keys.fireDate)
-                UserDefaults.standard.removeObject(forKey: Keys.usesSystemAlarm)
-            }
-        }
-    }
-
-    // MARK: - Scheduling
-
-    func schedule(at date: Date) async {
-        errorMessage = nil
-        guard date.timeIntervalSinceNow > 0.5 else {
-            errorMessage = "请选择一个晚于当前时间的时间。"
-            return
-        }
-
-        await clearScheduledAlerts()
-
-        var usedAlarmKit = false
-        var alarmKitError: Error?
-
-        #if canImport(AlarmKit)
-        if #available(iOS 26.0, *) {
-            do {
-                usedAlarmKit = try await scheduleWithAlarmKit(at: date)
-            } catch {
-                alarmKitError = error
-            }
-        }
-        #endif
-
-        if usedAlarmKit {
-            scheduleDescription = "系统闹钟 · 可穿透静音与专注模式"
+        if let stored = defaults.object(forKey: Keys.lastDoseDate) as? Date {
+            lastDoseDate = stored
         } else {
-            do {
-                try await scheduleNotification(at: date)
-                if alarmKitError != nil {
-                    scheduleDescription = "本地通知 · 系统闹钟不可用，已降级"
-                } else {
-                    scheduleDescription = "本地通知 · 静音模式下可能没有声音"
-                }
-            } catch {
-                errorMessage = error.localizedDescription
-                fireDate = nil
-                return
-            }
+            // 默认校准：昨天晚上（常见场景）
+            var day = Calendar.current.date(byAdding: .day, value: -1, to: Date()) ?? Date()
+            day = Calendar.current.startOfDay(for: day)
+            let m = Self.defaultEveningMinutes
+            lastDoseDate = Calendar.current.date(
+                byAdding: DateComponents(minute: m),
+                to: day
+            ) ?? day
         }
 
-        fireDate = date
-        usesSystemAlarm = usedAlarmKit
-        UserDefaults.standard.set(date, forKey: Keys.fireDate)
-        UserDefaults.standard.set(usedAlarmKit, forKey: Keys.usesSystemAlarm)
-        startMonitor()
+        isRunning = defaults.bool(forKey: Keys.isRunning)
+
+        if let data = defaults.data(forKey: Keys.records),
+           let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
+            records = decoded
+        }
+        if let data = defaults.data(forKey: Keys.alarmIDs),
+           let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
+            alarmIDs = decoded
+        }
+        if let data = defaults.data(forKey: Keys.plan),
+           let decoded = try? JSONDecoder().decode([PlannedDose].self, from: data) {
+            plan = decoded
+        }
+        pruneRecords()
     }
 
-    func cancel() async {
+    // MARK: derived
+
+    var isAlternating: Bool { intervalHalfDays % 2 == 1 }
+    var isTwiceDaily: Bool { intervalHalfDays == 1 }
+
+    var intervalText: String {
+        let days = Double(intervalHalfDays) / 2
+        return days.truncatingRemainder(dividingBy: 1) == 0
+            ? String(Int(days))
+            : String(format: "%.1f", days)
+    }
+
+    var intervalHint: String {
+        if isTwiceDaily { return "每天 2 次 · 早晚各一次" }
+        if isAlternating { return "每 \(intervalText) 天 1 次 · 早晚自动交替" }
+        return "每 \(intervalText) 天 1 次 · 固定在\(lastDoseSlot.label)"
+    }
+
+    func anchor(for slot: MedSlot) -> (hour: Int, minute: Int) {
+        let m = slot == .morning ? morningMinutes : eveningMinutes
+        return (m / 60, m % 60)
+    }
+
+    func anchorDate(for slot: MedSlot, on day: Date = Date()) -> Date {
+        let (h, m) = anchor(for: slot)
+        var comps = Calendar.current.dateComponents([.year, .month, .day], from: day)
+        comps.hour = h
+        comps.minute = m
+        return Calendar.current.date(from: comps) ?? day
+    }
+
+    var missedDoses: [PlannedDose] {
+        let now = Date()
+        return plan.filter { $0.date <= now && records[$0.id] == nil }
+    }
+
+    var upcomingDoses: [PlannedDose] {
+        let now = Date()
+        return plan.filter { $0.date > now }
+    }
+
+    /// 下一个等待用户操作（已服用/跳过）的剂次，可能是刚过点的未记录剂次
+    var nextActionable: PlannedDose? {
+        plan.first { records[$0.id] == nil }
+    }
+
+    func action(for dose: PlannedDose) -> DoseAction? {
+        records[dose.id].flatMap(DoseAction.init(rawValue:))
+    }
+
+    // MARK: start / stop
+
+    func start() async {
+        errorMessage = nil
+        isRunning = true
+        defaults.set(true, forKey: Keys.isRunning)
+        scheduleRebuild()
+    }
+
+    func stop() async {
+        rebuildTask?.cancel()
+        rebuildTask = nil
+        rebuildGeneration += 1
+        await cancelAllScheduled()
         monitor?.invalidate()
         monitor = nil
         stopRinging()
-        fireDate = nil
-        usesSystemAlarm = false
+        isRunning = false
+        defaults.set(false, forKey: Keys.isRunning)
+        plan = []
         scheduleDescription = ""
-        UserDefaults.standard.removeObject(forKey: Keys.fireDate)
-        UserDefaults.standard.removeObject(forKey: Keys.usesSystemAlarm)
-        await clearScheduledAlerts()
     }
 
-    /// Called when the app becomes active again, so a passed deadline still rings.
-    func refresh() {
-        tick()
+    func refreshOnActive() async {
+        guard isRunning else { return }
+        startMonitor()
+        let futureUnrecorded = upcomingDoses.filter { records[$0.id] == nil }.count
+        if futureUnrecorded < 16 {
+            scheduleRebuild()
+        }
+        evaluateRinging()
     }
 
-    private func clearScheduledAlerts() async {
-        UNUserNotificationCenter.current()
-            .removePendingNotificationRequests(withIdentifiers: [Self.notificationID])
-        UNUserNotificationCenter.current()
-            .removeDeliveredNotifications(withIdentifiers: [Self.notificationID])
+    // MARK: scheduling core
 
+    /// 由上一剂推导下一剂：非整天间隔时早晚交替，钟点取对应锚点时间
+    private func nextDose(after prev: PlannedDose) -> PlannedDose {
+        let slot: MedSlot = isAlternating ? prev.slot.flipped() : prev.slot
+        let nominal = prev.date.addingTimeInterval(Double(intervalHalfDays) * 12 * 3600)
+        var comps = Calendar.current.dateComponents([.year, .month, .day], from: nominal)
+        let (h, m) = anchor(for: slot)
+        comps.hour = h
+        comps.minute = m
+        let date = Calendar.current.date(from: comps) ?? nominal
+        return PlannedDose(date: date, slot: slot)
+    }
+
+    func buildUpcoming(count: Int) -> [PlannedDose] {
+        var result: [PlannedDose] = []
+        var current = PlannedDose(date: lastDoseDate, slot: lastDoseSlot)
+        var steps = 0
+        let now = Date()
+        while result.count < count && steps < 500 {
+            steps += 1
+            let next = nextDose(after: current)
+            current = next
+            if next.date > now { result.append(next) }
+        }
+        return result
+    }
+
+    private func scheduleRebuild() {
+        guard isRunning else { return }
+        rebuildGeneration += 1
+        let generation = rebuildGeneration
+        rebuildTask?.cancel()
+        rebuildTask = Task { [weak self] in
+            await self?.rebuild(generation: generation)
+        }
+    }
+
+    private func rebuild(generation: Int) async {
+        let upcoming = buildUpcoming(count: Self.preScheduleCount)
+        plan = upcoming
+        defaults.set(encode(upcoming), forKey: Keys.plan)
+
+        var usedSystem = false
         #if canImport(AlarmKit)
-        if #available(iOS 26.0, *), let id = alarmKitID {
-            try? await AlarmManager.shared.cancel(id: id)
+        if #available(iOS 26.0, *) {
+            do {
+                let state = try await AlarmManager.shared.requestAuthorization()
+                usedSystem = (state == .authorized)
+            } catch {
+                usedSystem = false
+            }
         }
         #endif
+        guard generation == rebuildGeneration, !Task.isCancelled else { return }
 
-        alarmKitID = nil
-        UserDefaults.standard.removeObject(forKey: Keys.alarmKitID)
+        usesSystemAlarm = usedSystem
+        scheduleDescription = usedSystem
+            ? "系统闹钟 · 可穿透静音与专注模式"
+            : "本地通知 · 静音模式下可能没有声音"
+
+        await scheduleAll(upcoming)
+        guard generation == rebuildGeneration, !Task.isCancelled else { return }
+
+        startMonitor()
+        evaluateRinging()
     }
 
-    // MARK: - AlarmKit (iOS 26+)
+    /// 先清空全部已排定提醒，再逐剂重新排定，保证与当前计划严格一致
+    private func scheduleAll(_ doses: [PlannedDose]) async {
+        await cancelAllScheduled()
+
+        if usesSystemAlarm {
+            #if canImport(AlarmKit)
+            if #available(iOS 26.0, *) {
+                let manager = AlarmManager.shared
+                for dose in doses {
+                    do {
+                        let uuid = try await scheduleAlarmKit(dose, manager: manager)
+                        alarmIDs[dose.id] = uuid.uuidString
+                    } catch {
+                        // 单剂排定失败 → 该剂退化为本地通知
+                        await addNotification(for: dose)
+                    }
+                }
+            }
+            #endif
+        } else {
+            for dose in doses {
+                await addNotification(for: dose)
+            }
+        }
+
+        defaults.set(encode(alarmIDs), forKey: Keys.alarmIDs)
+    }
 
     #if canImport(AlarmKit)
     @available(iOS 26.0, *)
-    private func scheduleWithAlarmKit(at date: Date) async throws -> Bool {
-        let manager = AlarmManager.shared
-        let state = try await manager.requestAuthorization()
-        guard state == .authorized else { return false }
-
+    private func scheduleAlarmKit(_ dose: PlannedDose, manager: AlarmManager) async throws -> UUID {
         let alert = AlarmPresentation.Alert(
-            title: "闹钟时间到了",
+            title: "该吃药了",
             stopButton: AlarmButton(
-                text: "停止",
+                text: "知道了",
                 textColor: .white,
-                systemImageName: "stop.circle"
-            ),
-            secondaryButton: nil,
-            secondaryButtonBehavior: nil
+                systemImageName: "pills"
+            )
         )
 
         let attributes = AlarmAttributes<AlarmMetadataPayload>(
@@ -174,7 +340,7 @@ final class AlarmScheduler: ObservableObject {
 
         let configuration = AlarmManager.AlarmConfiguration(
             countdownDuration: nil,
-            schedule: .fixed(date),
+            schedule: .fixed(dose.date),
             attributes: attributes,
             stopIntent: nil,
             secondaryIntent: nil,
@@ -183,77 +349,91 @@ final class AlarmScheduler: ObservableObject {
 
         let id = UUID()
         _ = try await manager.schedule(id: id, configuration: configuration)
-        alarmKitID = id
-        UserDefaults.standard.set(id.uuidString, forKey: Keys.alarmKitID)
-        return true
+        return id
     }
     #endif
 
-    // MARK: - Local notification fallback
-
-    private func scheduleNotification(at date: Date) async throws {
-        let center = UNUserNotificationCenter.current()
-        let granted = try await center.requestAuthorization(options: [.alert, .sound])
-        guard granted else { throw ScheduleError.notificationsDenied }
-
+    private func addNotification(for dose: PlannedDose) async {
+        let interval = dose.date.timeIntervalSinceNow
+        guard interval > 0.5 else { return }
         let content = UNMutableNotificationContent()
-        content.title = "闹钟时间到了"
-        content.body = "现在是 \(Self.clockString(date))"
+        content.title = "该吃药了"
+        content.body = "\(Self.dateText(dose.date)) \(Self.timeText(dose.date)) · \(dose.slot.label)剂"
         content.sound = UNNotificationSound(named: UNNotificationSoundName(rawValue: "alarm.wav"))
-
-        let trigger = UNTimeIntervalNotificationTrigger(
-            timeInterval: max(1, date.timeIntervalSinceNow),
-            repeats: false
-        )
-
-        let request = UNNotificationRequest(
-            identifier: Self.notificationID,
-            content: content,
-            trigger: trigger
-        )
-        try await center.add(request)
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: interval, repeats: false)
+        let request = UNNotificationRequest(identifier: "med.\(dose.id)", content: content, trigger: trigger)
+        try? await UNUserNotificationCenter.current().add(request)
     }
 
-    // MARK: - Foreground ringing
+    private func cancelAllScheduled() async {
+        let center = UNUserNotificationCenter.current()
+        let pending = await center.pendingNotificationRequests()
+        let medIds = pending.map(\.identifier).filter { $0.hasPrefix("med.") }
+        if !medIds.isEmpty {
+            center.removePendingNotificationRequests(withIdentifiers: medIds)
+        }
+        #if canImport(AlarmKit)
+        if #available(iOS 26.0, *) {
+            for uuidStr in alarmIDs.values {
+                if let uuid = UUID(uuidString: uuidStr) {
+                    try? await AlarmManager.shared.cancel(id: uuid)
+                }
+            }
+        }
+        #endif
+        alarmIDs = [:]
+        defaults.removeObject(forKey: Keys.alarmIDs)
+    }
+
+    // MARK: record
+
+    func record(_ dose: PlannedDose, action: DoseAction) async {
+        records[dose.id] = action.rawValue
+        pruneRecords()
+        persistRecords()
+        stopRinging()
+        lastDoseDate = dose.date
+        lastDoseSlot = dose.slot
+    }
+
+    // MARK: in-app ringing
+
+    func startMonitorIfNeeded() {
+        guard isRunning else { return }
+        startMonitor()
+        evaluateRinging()
+    }
 
     private func startMonitor() {
         monitor?.invalidate()
         let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.tick()
+                self?.evaluateRinging()
             }
         }
         RunLoop.main.add(timer, forMode: .common)
         monitor = timer
-        tick()
     }
 
-    private func tick() {
-        guard let fireDate, !isRinging, Date() >= fireDate else { return }
+    /// 到点响铃判定：App 在前台跨过剂次时间，或刚打开 App 且剂次在 2 小时内过点且未记录。
+    /// 使用系统闹钟（AlarmKit）时由系统全屏提醒，App 内不重复响铃。
+    func evaluateRinging() {
+        guard isRunning, !isRinging else { return }
+        let now = Date()
+        guard let dose = plan.first(where: {
+            records[$0.id] == nil
+                && now >= $0.date
+                && now.timeIntervalSince($0.date) <= Self.activeRingGrace
+        }) else { return }
 
-        // AlarmKit already presents its own full-screen alert with sound,
-        // so the app must not ring a second time on top of it.
-        if usesSystemAlarm {
-            monitor?.invalidate()
-            monitor = nil
-            self.fireDate = nil
-            usesSystemAlarm = false
-            scheduleDescription = ""
-            alarmKitID = nil
-            UserDefaults.standard.removeObject(forKey: Keys.fireDate)
-            UserDefaults.standard.removeObject(forKey: Keys.usesSystemAlarm)
-            UserDefaults.standard.removeObject(forKey: Keys.alarmKitID)
-            return
-        }
-
-        startRinging()
+        if usesSystemAlarm { return }
+        startRinging(dose)
     }
 
-    private func startRinging() {
+    private func startRinging(_ dose: PlannedDose) {
         guard !isRinging else { return }
         isRinging = true
-        monitor?.invalidate()
-        monitor = nil
+        ringingDose = dose
 
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.playback, mode: .default, options: [])
@@ -273,14 +453,52 @@ final class AlarmScheduler: ObservableObject {
         player?.stop()
         player = nil
         isRinging = false
+        ringingDose = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
-    // MARK: - Formatting
+    // MARK: persistence helpers
 
-    static func clockString(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        return formatter.string(from: date)
+    private func persist() {
+        defaults.set(intervalHalfDays, forKey: Keys.interval)
+        defaults.set(morningMinutes, forKey: Keys.morningMinutes)
+        defaults.set(eveningMinutes, forKey: Keys.eveningMinutes)
+        defaults.set(lastDoseDate, forKey: Keys.lastDoseDate)
+        defaults.set(lastDoseSlot.rawValue, forKey: Keys.lastDoseSlot)
+    }
+
+    private func persistRecords() {
+        defaults.set(encode(records), forKey: Keys.records)
+    }
+
+    private func pruneRecords() {
+        let cutoff = Date().addingTimeInterval(-Self.recordRetention)
+        records = records.filter { key, _ in
+            guard let epoch = key.split(separator: "-").first, let t = Double(epoch) else { return false }
+            return Date(timeIntervalSince1970: t) > cutoff
+        }
+    }
+
+    private func encode<T: Encodable>(_ value: T) -> Data? {
+        try? JSONEncoder().encode(value)
+    }
+
+    // MARK: formatting
+
+    static func dateText(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "M月d日"
+        return f.string(from: date)
+    }
+
+    static func timeText(_ date: Date) -> String {
+        let comps = Calendar.current.dateComponents([.hour, .minute], from: date)
+        return String(format: "%02d:%02d", comps.hour ?? 0, comps.minute ?? 0)
+    }
+
+    static func weekdayText(_ date: Date) -> String {
+        let names = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"]
+        let index = Calendar.current.component(.weekday, from: date) - 1
+        return names[index]
     }
 }

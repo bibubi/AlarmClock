@@ -473,7 +473,9 @@ struct ContentView: View {
                         .font(.system(size: 15, weight: .semibold))
                         .monospacedDigit()
                         .foregroundStyle(.white)
-                        .padding(.horizontal, 14)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .padding(.horizontal, 12)
                         .padding(.vertical, 9)
                         .background(
                             Color.white.opacity(0.1),
