@@ -8,6 +8,15 @@ struct ContentView: View {
     @State private var showPlan = false
     @State private var editingSlot: MedSlot?
     @State private var draftTime = Date()
+    @State private var showDateSheet = false
+    @State private var draftDate = Date()
+
+    private static let cnDate: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "zh_CN")
+        f.dateFormat = "yyyy年M月d日"
+        return f
+    }()
 
     var body: some View {
         ZStack {
@@ -353,6 +362,48 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
     }
 
+    private var dateSheet: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Button("取消") { showDateSheet = false }
+                    .font(.system(size: 15))
+                    .foregroundStyle(.white.opacity(0.55))
+                Spacer()
+                Text("最近一次服用日期")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
+                Spacer()
+                Button("确定") {
+                    scheduler.lastDoseDate = draftDate
+                    showDateSheet = false
+                }
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.orange)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 16)
+
+            DatePicker(
+                "",
+                selection: $draftDate,
+                in: ...Date(),
+                displayedComponents: .date
+            )
+            .datePickerStyle(.wheel)
+            .labelsHidden()
+            .environment(\.locale, Locale(identifier: "zh_CN"))
+            .frame(height: 190)
+            .padding(.top, 2)
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(Color(red: 0.09, green: 0.09, blue: 0.13))
+        .presentationDetents([.height(276)])
+        .presentationDragIndicator(.visible)
+        .preferredColorScheme(.dark)
+    }
+
     private func anchorUsage(_ slot: MedSlot) -> String {
         if scheduler.isTwiceDaily || scheduler.isAlternating { return "使用中" }
         return scheduler.lastDoseSlot == slot ? "使用中" : "不使用"
@@ -414,18 +465,23 @@ struct ContentView: View {
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 8) {
-                DatePicker(
-                    "",
-                    selection: Binding(
-                        get: { scheduler.lastDoseDate },
-                        set: { scheduler.lastDoseDate = $0 }
-                    ),
-                    displayedComponents: .date
-                )
-                .datePickerStyle(.compact)
-                .labelsHidden()
-                .environment(\.locale, Locale(identifier: "zh_CN"))
-                .tint(.white)
+                Button {
+                    draftDate = scheduler.lastDoseDate
+                    showDateSheet = true
+                } label: {
+                    Text(Self.cnDate.string(from: scheduler.lastDoseDate))
+                        .font(.system(size: 15, weight: .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .background(
+                            Color.white.opacity(0.1),
+                            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        )
+                }
+                .buttonStyle(.plain)
+                .sheet(isPresented: $showDateSheet) { dateSheet }
 
                 HStack(spacing: 3) {
                     slotButton(.morning)
