@@ -32,48 +32,71 @@ struct ContentView: View {
     // MARK: - Main
 
     private var mainView: some View {
+        ZStack(alignment: .bottom) {
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 0) {
+                    topbar
+                        .padding(.bottom, 14)
+
+                    intervalCard
+
+                    timeCard
+                        .padding(.top, 12)
+
+                    foldRow(
+                        icon: "target", title: "服药校准",
+                        summary: calibrationSummary, isOpen: showCalibration
+                    ) {
+                        withAnimation(.easeInOut(duration: 0.2)) { showCalibration.toggle() }
+                    }
+                    .padding(.top, 10)
+
+                    if showCalibration {
+                        calibrationBody
+                    }
+
+                    foldRow(
+                        icon: "list.clipboard", title: "未来计划",
+                        summary: planSummary, isOpen: showPlan
+                    ) {
+                        withAnimation(.easeInOut(duration: 0.2)) { showPlan.toggle() }
+                    }
+                    .padding(.top, 10)
+
+                    if showPlan {
+                        planBody
+                    }
+
+                    Color.clear
+                        .frame(height: 150)
+                }
+                .padding(.horizontal, 22)
+                .padding(.top, 50)
+            }
+
+            bottomBar
+        }
+    }
+
+    private var bottomBar: some View {
         VStack(spacing: 0) {
-            topbar
-                .padding(.bottom, 14)
-
-            intervalCard
-
-            timeCard
-                .padding(.top, 12)
-
-            foldRow(
-                icon: "target", title: "服药校准",
-                summary: calibrationSummary, isOpen: showCalibration
-            ) {
-                withAnimation(.easeInOut(duration: 0.2)) { showCalibration.toggle() }
-            }
-            .padding(.top, 10)
-
-            if showCalibration {
-                calibrationBody
-            }
-
-            foldRow(
-                icon: "list.clipboard", title: "未来计划",
-                summary: planSummary, isOpen: showPlan
-            ) {
-                withAnimation(.easeInOut(duration: 0.2)) { showPlan.toggle() }
-            }
-            .padding(.top, 10)
-
-            if showPlan {
-                planBody
-            }
-
-            Spacer(minLength: 12)
-
             countdown
-
             actionButton
         }
         .padding(.horizontal, 22)
-        .padding(.top, 50)
+        .padding(.top, 12)
         .padding(.bottom, 26)
+        .background(
+            LinearGradient(
+                colors: [
+                    Color(red: 0.02, green: 0.02, blue: 0.04).opacity(0),
+                    Color(red: 0.02, green: 0.02, blue: 0.04)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea(edges: .bottom)
+        )
     }
 
     private var background: some View {
