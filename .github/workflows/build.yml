@@ -20,9 +20,7 @@ jobs:
           xcodebuild -version
 
       - name: Generate sound and icon assets
-        run: |
-          pip3 install --quiet numpy pillow
-          python3 scripts/make_assets.py
+        run: python3 scripts/make_assets.py
 
       - name: Build app (unsigned, device)
         run: |
