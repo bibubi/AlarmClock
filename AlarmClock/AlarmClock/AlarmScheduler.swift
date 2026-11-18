@@ -2,16 +2,7 @@ import Foundation
 import SwiftUI
 import Combine
 import UIKit
-import AVFoundation
 import UserNotifications
-
-#if canImport(AlarmKit)
-import AlarmKit
-#endif
-
-#if canImport(AlarmKit)
-struct AlarmMetadataPayload: AlarmMetadata {}
-#endif
 
 // MARK: - Model
 
@@ -61,11 +52,9 @@ final class AlarmScheduler: ObservableObject {
         static let lastDoseSlot = "med.lastDoseSlot"
         static let isRunning = "med.isRunning"
         static let plan = "med.plan"
-        static let alarmIDs = "med.alarmIDs"
         static let records = "med.records"
         static let snoozeUntil = "med.snoozeUntil"
         static let snoozeDose = "med.snoozeDose"
-        static let snoozeAlarmID = "med.snoozeAlarmID"
     }
 
     static let snoozeDuration: TimeInterval = 10 * 60
@@ -99,15 +88,11 @@ final class AlarmScheduler: ObservableObject {
     @Published private(set) var ringingDose: PlannedDose?
     @Published private(set) var snoozedDose: PlannedDose?
     @Published private(set) var snoozeUntil: Date?
-    @Published private(set) var usesSystemAlarm = false
     @Published private(set) var scheduleDescription = ""
     @Published private(set) var errorMessage: String?
 
     private var records: [String: String] = [:]
-    private var alarmIDs: [String: String] = [:]   // doseId -> AlarmKit UUID
-    private var snoozeAlarmID: String?
     private var monitor: Timer?
-    private var player: AVAudioPlayer?
     private var rebuildTask: Task<Void, Never>?
     private var rebuildGeneration = 0
 
@@ -141,10 +126,6 @@ final class AlarmScheduler: ObservableObject {
            let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
             records = decoded
         }
-        if let data = defaults.data(forKey: Keys.alarmIDs),
-           let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
-            alarmIDs = decoded
-        }
         if let data = defaults.data(forKey: Keys.plan),
            let decoded = try? JSONDecoder().decode([PlannedDose].self, from: data) {
             plan = decoded
@@ -155,7 +136,6 @@ final class AlarmScheduler: ObservableObject {
             snoozedDose = dose
             snoozeUntil = until
         }
-        snoozeAlarmID = defaults.string(forKey: Keys.snoozeAlarmID)
         pruneRecords()
     }
 
@@ -223,6 +203,15 @@ final class AlarmScheduler: ObservableObject {
 
     func start() async {
         errorMessage = nil
+        do {
+            let granted = try await UNUserNotificationCenter.current()
+                .requestAuthorization(options: [.alert, .sound, .badge])
+            if !granted {
+                errorMessage = "通知权限被拒绝，请到系统设置里允许「通知」"
+            }
+        } catch {
+            errorMessage = "通知授权失败：\(error.localizedDescription)"
+        }
         isRunning = true
         defaults.set(true, forKey: Keys.isRunning)
         scheduleRebuild()
@@ -300,23 +289,8 @@ final class AlarmScheduler: ObservableObject {
         plan = upcoming
         defaults.set(encode(upcoming), forKey: Keys.plan)
 
-        var usedSystem = false
-        #if canImport(AlarmKit)
-        if #available(iOS 26.0, *) {
-            do {
-                let state = try await AlarmManager.shared.requestAuthorization()
-                usedSystem = (state == .authorized)
-            } catch {
-                usedSystem = false
-            }
-        }
-        #endif
         guard generation == rebuildGeneration, !Task.isCancelled else { return }
-
-        usesSystemAlarm = usedSystem
-        scheduleDescription = usedSystem
-            ? "系统闹钟 · 可穿透静音与专注模式"
-            : "本地通知 · 静音模式下可能没有声音"
+        scheduleDescription = "本地通知 · 到点推送提示音"
 
         await scheduleAll(upcoming)
         guard generation == rebuildGeneration, !Task.isCancelled else { return }
@@ -333,62 +307,10 @@ final class AlarmScheduler: ObservableObject {
     private func scheduleAll(_ doses: [PlannedDose]) async {
         await cancelAllScheduled()
 
-        if usesSystemAlarm {
-            #if canImport(AlarmKit)
-            if #available(iOS 26.0, *) {
-                let manager = AlarmManager.shared
-                for dose in doses {
-                    do {
-                        let uuid = try await scheduleAlarmKit(dose, at: dose.date, manager: manager)
-                        alarmIDs[dose.id] = uuid.uuidString
-                    } catch {
-                        // 单剂排定失败 → 该剂退化为本地通知
-                        await addNotification(for: dose)
-                    }
-                }
-            }
-            #endif
-        } else {
-            for dose in doses {
-                await addNotification(for: dose)
-            }
+        for dose in doses {
+            await addNotification(for: dose)
         }
-
-        defaults.set(encode(alarmIDs), forKey: Keys.alarmIDs)
     }
-
-    #if canImport(AlarmKit)
-    @available(iOS 26.0, *)
-    private func scheduleAlarmKit(_ dose: PlannedDose, at date: Date, manager: AlarmManager) async throws -> UUID {
-        let alert = AlarmPresentation.Alert(
-            title: "该吃药了",
-            stopButton: AlarmButton(
-                text: "知道了",
-                textColor: .white,
-                systemImageName: "pills"
-            )
-        )
-
-        let attributes = AlarmAttributes<AlarmMetadataPayload>(
-            presentation: AlarmPresentation(alert: alert, countdown: nil, paused: nil),
-            metadata: AlarmMetadataPayload(),
-            tintColor: .orange
-        )
-
-        let configuration = AlarmManager.AlarmConfiguration(
-            countdownDuration: nil,
-            schedule: .fixed(date),
-            attributes: attributes,
-            stopIntent: nil,
-            secondaryIntent: nil,
-            sound: .default
-        )
-
-        let id = UUID()
-        _ = try await manager.schedule(id: id, configuration: configuration)
-        return id
-    }
-    #endif
 
     private func addNotification(for dose: PlannedDose) async {
         let interval = dose.date.timeIntervalSinceNow
@@ -421,21 +343,6 @@ final class AlarmScheduler: ObservableObject {
               until.timeIntervalSinceNow > 0.5,
               records[dose.id] == nil else { return }
 
-        if usesSystemAlarm {
-            #if canImport(AlarmKit)
-            if #available(iOS 26.0, *) {
-                do {
-                    let uuid = try await scheduleAlarmKit(dose, at: until, manager: AlarmManager.shared)
-                    snoozeAlarmID = uuid.uuidString
-                    persistSnooze()
-                    return
-                } catch {
-                    // 系统闹钟排定失败 → 退化为本地通知
-                }
-            }
-            #endif
-        }
-
         let content = UNMutableNotificationContent()
         content.title = "该吃药了"
         content.body = "\(Self.dateText(dose.date)) \(Self.timeText(dose.date)) · \(dose.slot.label)剂 尚未记录"
@@ -455,21 +362,12 @@ final class AlarmScheduler: ObservableObject {
     private func cancelSnoozeReminder() async {
         UNUserNotificationCenter.current()
             .removePendingNotificationRequests(withIdentifiers: [Self.snoozeNotificationID])
-        #if canImport(AlarmKit)
-        if #available(iOS 26.0, *) {
-            if let id = snoozeAlarmID, let uuid = UUID(uuidString: id) {
-                try? await AlarmManager.shared.cancel(id: uuid)
-            }
-        }
-        #endif
-        snoozeAlarmID = nil
         persistSnooze()
     }
 
     private func clearSnooze() {
         snoozedDose = nil
         snoozeUntil = nil
-        snoozeAlarmID = nil
         persistSnooze()
     }
 
@@ -480,7 +378,6 @@ final class AlarmScheduler: ObservableObject {
         } else {
             defaults.removeObject(forKey: Keys.snoozeDose)
         }
-        defaults.set(snoozeAlarmID, forKey: Keys.snoozeAlarmID)
     }
 
     private func cancelAllScheduled() async {
@@ -490,17 +387,6 @@ final class AlarmScheduler: ObservableObject {
         if !medIds.isEmpty {
             center.removePendingNotificationRequests(withIdentifiers: medIds)
         }
-        #if canImport(AlarmKit)
-        if #available(iOS 26.0, *) {
-            for uuidStr in alarmIDs.values {
-                if let uuid = UUID(uuidString: uuidStr) {
-                    try? await AlarmManager.shared.cancel(id: uuid)
-                }
-            }
-        }
-        #endif
-        alarmIDs = [:]
-        defaults.removeObject(forKey: Keys.alarmIDs)
     }
 
     // MARK: record
@@ -538,7 +424,7 @@ final class AlarmScheduler: ObservableObject {
     }
 
     /// 到点响铃判定：App 在前台跨过剂次时间，或刚打开 App 且剂次在 2 小时内过点且未记录。
-    /// 使用系统闹钟（AlarmKit）时由系统全屏提醒，App 内不重复响铃。
+    /// 声音由系统通知负责，App 内只显示全屏提醒页面。
     func evaluateRinging() {
         guard isRunning, !isRinging else { return }
         let now = Date()
@@ -547,7 +433,6 @@ final class AlarmScheduler: ObservableObject {
         if let dose = snoozedDose, let until = snoozeUntil, records[dose.id] == nil {
             if now < until { return }
             if now.timeIntervalSince(until) <= Self.activeRingGrace {
-                if usesSystemAlarm { return }
                 startRinging(dose)
                 return
             }
@@ -560,7 +445,6 @@ final class AlarmScheduler: ObservableObject {
                 && now.timeIntervalSince($0.date) <= Self.activeRingGrace
         }) else { return }
 
-        if usesSystemAlarm { return }
         startRinging(dose)
     }
 
@@ -568,27 +452,12 @@ final class AlarmScheduler: ObservableObject {
         guard !isRinging else { return }
         isRinging = true
         ringingDose = dose
-
-        let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, mode: .default, options: [])
-        try? session.setActive(true)
-
-        if let url = Bundle.main.url(forResource: "alarm", withExtension: "wav") {
-            player = try? AVAudioPlayer(contentsOf: url)
-            player?.numberOfLoops = -1
-            player?.volume = 1
-            player?.play()
-        }
-
         UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
     }
 
     private func stopRinging() {
-        player?.stop()
-        player = nil
         isRinging = false
         ringingDose = nil
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
     // MARK: persistence helpers
