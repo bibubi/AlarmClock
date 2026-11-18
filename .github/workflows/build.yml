@@ -58,6 +58,12 @@ jobs:
         run: |
           APP_PATH="build/Build/Products/Release-iphoneos/AlarmClock.app"
           test -d "$APP_PATH"
+          # Xcode 的同步文件夹不会收录构建前新生成的音频，这里显式拷入
+          for f in AlarmClock/*.wav; do
+            cp -f "$f" "$APP_PATH/"
+            echo "injected $f"
+          done
+          ls -l "$APP_PATH"/*.wav
           rm -rf Payload AlarmClock.ipa
           mkdir Payload
           cp -R "$APP_PATH" Payload/
