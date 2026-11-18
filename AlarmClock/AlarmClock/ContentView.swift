@@ -96,6 +96,10 @@ struct ContentView: View {
     private var bottomBar: some View {
         VStack(spacing: 0) {
             countdown
+            if showTestButton {
+                testRow
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
             actionButton
         }
         .padding(.horizontal, 22)
@@ -164,21 +168,26 @@ struct ContentView: View {
                     .foregroundStyle(.white.opacity(0.55))
             }
         }
-        // 整条标题栏都可长按（热区足够大，手指不必精准压在文字上）
-        .padding(.vertical, 8)
-        .contentShape(Rectangle())
-        .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.6)
-                .onEnded { _ in toggleTestButton() }
-        )
         .animation(.easeInOut(duration: 0.2), value: showTestButton)
     }
 
     private func toggleTestButton() {
-        showTestButton.toggle()
+        withAnimation(.easeInOut(duration: 0.2)) {
+            showTestButton.toggle()
+        }
         if !showTestButton { cancelTestCountdown() }
         UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
-        print("[test] 测试按钮 showTestButton =", showTestButton)
+    }
+
+    /// 长按「启动提醒 / 停止提醒」后，在其上方显示或隐藏
+    private var testRow: some View {
+        VStack(spacing: 6) {
+            testButton
+            Text("测试提醒 · 不写入服药记录")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.white.opacity(0.35))
+        }
+        .padding(.bottom, 10)
     }
 
     /// 测试按钮：点一下开始 10 秒倒数，倒数结束立即进入全屏响铃
@@ -190,16 +199,16 @@ struct ContentView: View {
                 startTestCountdown()
             }
         } label: {
-            HStack(spacing: 3) {
+            HStack(spacing: 5) {
                 Image(systemName: testCountdown == nil ? "alarm.waves.left.and.right.fill" : "timer")
-                    .font(.system(size: 10, weight: .bold))
-                Text(testCountdown.map { "\($0)s" } ?? "测试")
-                    .font(.system(size: 10, weight: .heavy))
+                    .font(.system(size: 12, weight: .bold))
+                Text(testCountdown.map { "\($0) 秒后响铃" } ?? "测试提醒")
+                    .font(.system(size: 12, weight: .heavy))
                     .monospacedDigit()
             }
             .foregroundStyle(testCountdown == nil ? Color.orange : Color.black)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
             .background(
                 Capsule().fill(testCountdown == nil ? Color.orange.opacity(0.18) : Color.orange)
             )
@@ -688,15 +697,7 @@ struct ContentView: View {
     }
 
     private var actionButton: some View {
-        Button {
-            Task {
-                if scheduler.isRunning {
-                    await scheduler.stop()
-                } else {
-                    await scheduler.start()
-                }
-            }
-        } label: {
+        Group {
             HStack(spacing: 8) {
                 Image(systemName: scheduler.isRunning ? "xmark" : "pill.fill")
                     .font(.system(size: 15, weight: .bold))
@@ -724,7 +725,28 @@ struct ContentView: View {
             }
             .foregroundStyle(.white)
         }
-        .buttonStyle(.plain)
+        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        // 轻点：启动/停止提醒；长按 0.6 秒：显示/隐藏上方测试按钮
+        // exclusively 保证两者只会触发一个，长按绝不会误启动提醒
+        .gesture(
+            LongPressGesture(minimumDuration: 0.6)
+                .onEnded { _ in toggleTestButton() }
+                .exclusively(
+                    before: TapGesture().onEnded { toggleRunning() }
+                )
+        )
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel(scheduler.isRunning ? "停止提醒" : "启动提醒")
+    }
+
+    private func toggleRunning() {
+        Task {
+            if scheduler.isRunning {
+                await scheduler.stop()
+            } else {
+                await scheduler.start()
+            }
+        }
     }
 }
 
