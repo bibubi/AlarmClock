@@ -142,27 +142,18 @@ struct ContentView: View {
     }
 
     private var topbar: some View {
-        HStack(alignment: .firstTextBaseline) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("吃药提醒")
-                    .font(.system(size: 13, weight: .semibold))
-                    .tracking(3)
-                    .foregroundStyle(.white.opacity(0.55))
-                    .onLongPressGesture(minimumDuration: 0.7) {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            showTestButton.toggle()
-                        }
-                        if !showTestButton { cancelTestCountdown() }
-                        UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
-                    }
+        HStack(alignment: .center, spacing: 8) {
+            Text("吃药提醒")
+                .font(.system(size: 13, weight: .semibold))
+                .tracking(3)
+                .foregroundStyle(.white.opacity(0.55))
 
-                if showTestButton {
-                    testButton
-                        .transition(.scale.combined(with: .opacity))
-                }
+            if showTestButton {
+                testButton
+                    .transition(.scale.combined(with: .opacity))
             }
 
-            Spacer()
+            Spacer(minLength: 0)
 
             HStack(spacing: 6) {
                 Circle()
@@ -173,6 +164,21 @@ struct ContentView: View {
                     .foregroundStyle(.white.opacity(0.55))
             }
         }
+        // 整条标题栏都可长按（热区足够大，手指不必精准压在文字上）
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: 0.6)
+                .onEnded { _ in toggleTestButton() }
+        )
+        .animation(.easeInOut(duration: 0.2), value: showTestButton)
+    }
+
+    private func toggleTestButton() {
+        showTestButton.toggle()
+        if !showTestButton { cancelTestCountdown() }
+        UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+        print("[test] 测试按钮 showTestButton =", showTestButton)
     }
 
     /// 测试按钮：点一下开始 10 秒倒数，倒数结束立即进入全屏响铃
@@ -187,22 +193,20 @@ struct ContentView: View {
             HStack(spacing: 3) {
                 Image(systemName: testCountdown == nil ? "alarm.waves.left.and.right.fill" : "timer")
                     .font(.system(size: 10, weight: .bold))
-                if let n = testCountdown {
-                    Text("\(n)s")
-                        .font(.system(size: 10, weight: .heavy))
-                        .monospacedDigit()
-                }
+                Text(testCountdown.map { "\($0)s" } ?? "测试")
+                    .font(.system(size: 10, weight: .heavy))
+                    .monospacedDigit()
             }
             .foregroundStyle(testCountdown == nil ? Color.orange : Color.black)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 4)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
             .background(
-                Capsule().fill(testCountdown == nil ? Color.orange.opacity(0.16) : Color.orange)
+                Capsule().fill(testCountdown == nil ? Color.orange.opacity(0.18) : Color.orange)
             )
             .overlay(
-                Capsule().stroke(Color.orange.opacity(testCountdown == nil ? 0.5 : 0), lineWidth: 1)
+                Capsule().stroke(Color.orange.opacity(testCountdown == nil ? 0.6 : 0), lineWidth: 1)
             )
-            .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 2 }
+            .contentShape(Capsule())
         }
         .buttonStyle(.plain)
     }
