@@ -16,6 +16,8 @@ struct ContentView: View {
     @AppStorage("med.showTestButton") private var showTestButton = false
     @State private var testCountdown: Int?
     @State private var testTask: Task<Void, Never>?
+    /// 测试提醒的到点时刻；用绝对时间而不是递减计数，锁屏挂起后回来才不会算错
+    @State private var testDeadline: Date?
 
     private static let cnDate: DateFormatter = {
         let f = DateFormatter()
@@ -183,9 +185,16 @@ struct ContentView: View {
     private var testRow: some View {
         VStack(spacing: 6) {
             testButton
-            Text("测试提醒 · 锁屏也会响 · 不写入服药记录")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.white.opacity(0.35))
+            if !scheduler.testArmInfo.isEmpty {
+                Text(scheduler.testArmInfo)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.orange.opacity(0.85))
+                    .multilineTextAlignment(.center)
+            } else {
+                Text("测试提醒 · 锁屏也会响 · 不写入服药记录")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.35))
+            }
         }
         .padding(.bottom, 10)
     }
@@ -224,19 +233,26 @@ struct ContentView: View {
         testTask?.cancel()
         testTask = nil
         testCountdown = 10
+        let deadline = Date().addingTimeInterval(10)
+        testDeadline = deadline
         // 同时把系统闹钟/通知挂到 10 秒后：期间锁屏或切到后台，仍会照常响
         Task { await scheduler.armTestReminder() }
         testTask = Task {
-            for n in stride(from: 9, through: 0, by: -1) {
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 200_000_000)
                 if Task.isCancelled { return }
-                if n == 0 {
+                let remaining = deadline.timeIntervalSinceNow
+                if remaining <= 0 {
                     // 前台接管响铃，先撤掉系统闹钟与通知，避免两路声音叠加
                     await scheduler.fireTestReminder()
-                    await MainActor.run { testCountdown = nil }
-                } else {
-                    await MainActor.run { testCountdown = n }
+                    await MainActor.run {
+                        testCountdown = nil
+                        testDeadline = nil
+                    }
+                    return
                 }
+                let shown = Int(remaining.rounded(.up))
+                await MainActor.run { testCountdown = shown }
             }
         }
     }
@@ -245,6 +261,7 @@ struct ContentView: View {
         testTask?.cancel()
         testTask = nil
         testCountdown = nil
+        testDeadline = nil
         Task { await scheduler.cancelTestReminder() }
     }
 

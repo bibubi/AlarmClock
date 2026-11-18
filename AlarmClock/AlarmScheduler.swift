@@ -108,6 +108,8 @@ final class AlarmScheduler: ObservableObject {
     @Published private(set) var usesSystemAlarm = false
     /// 当前是否是手动测试触发的响铃（测试不写入服药记录）
     @Published private(set) var isTestRing = false
+    /// 测试提醒实际挂在哪条通道上，直接显示给用户，便于判断锁屏会不会响
+    @Published private(set) var testArmInfo = ""
 
     private var records: [String: String] = [:]
     private var alarmIDs: [String: String] = [:]   // doseId -> AlarmKit UUID
@@ -669,22 +671,44 @@ final class AlarmScheduler: ObservableObject {
         let fire = Date().addingTimeInterval(Self.testDelay)
         testFireDate = fire
         defaults.set(fire, forKey: Keys.testFireDate)
+        testArmInfo = ""
 
         var scheduledBySystem = false
         #if canImport(AlarmKit)
-        if #available(iOS 26.0, *), usesSystemAlarm {
+        if #available(iOS 26.0, *) {
             do {
-                let uuid = try await scheduleTestAlarmKit(at: fire)
-                testAlarmID = uuid.uuidString
-                defaults.set(uuid.uuidString, forKey: Keys.testAlarmID)
-                scheduledBySystem = true
+                // 关键：测试必须自己申请闹钟权限，不再依赖「是否已启动提醒」，
+                // 否则权限没拿到时锁屏不会有任何动静
+                let state = try await AlarmManager.shared.requestAuthorization()
+                if state == .authorized {
+                    let uuid = try await scheduleTestAlarmKit(at: fire)
+                    testAlarmID = uuid.uuidString
+                    defaults.set(uuid.uuidString, forKey: Keys.testAlarmID)
+                    usesSystemAlarm = true
+                    scheduledBySystem = true
+                    testArmInfo = "已排定系统闹钟 · 锁屏也会全屏响铃"
+                } else {
+                    testArmInfo = "未获得闹钟权限 · 只能用本地通知"
+                }
             } catch {
-                scheduledBySystem = false
+                testArmInfo = "系统闹钟排定失败 · 改用本地通知"
             }
+        } else {
+            testArmInfo = "系统低于 iOS 26 · 只能用本地通知"
         }
+        #else
+        testArmInfo = "此构建不含闹钟能力 · 只能用本地通知"
         #endif
 
         guard !scheduledBySystem else { return }
+
+        // 退化为本地通知：同样要确保通知权限已拿到，否则锁屏也不会响
+        let granted = (try? await UNUserNotificationCenter.current()
+            .requestAuthorization(options: [.alert, .sound, .badge])) ?? false
+        guard granted else {
+            testArmInfo += " · 通知权限未开启"
+            return
+        }
 
         let content = UNMutableNotificationContent()
         content.title = "测试提醒"
@@ -699,6 +723,7 @@ final class AlarmScheduler: ObservableObject {
             trigger: trigger
         )
         try? await UNUserNotificationCenter.current().add(request)
+        testArmInfo = "已排定本地通知 · 静音模式下可能没有声音"
     }
 
     func cancelTestReminder() async {
@@ -731,6 +756,11 @@ final class AlarmScheduler: ObservableObject {
         let elapsed = Date().timeIntervalSince(fire)
         guard elapsed >= 0 else { return }
         guard elapsed <= 300 else {
+            await cancelTestReminder()
+            return
+        }
+        // 系统闹钟已经负责过锁屏响铃，回到前台不再重放，避免重复打扰
+        if testAlarmID != nil || defaults.string(forKey: Keys.testAlarmID) != nil {
             await cancelTestReminder()
             return
         }
