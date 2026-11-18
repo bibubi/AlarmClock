@@ -18,43 +18,46 @@ ICON_DIR = os.path.join(APP_DIR, "Assets.xcassets", "AppIcon.appiconset")
 os.makedirs(ICON_DIR, exist_ok=True)
 
 # ---------------------------------------------------------------- alarm sound
+# 前台循环响铃：三连急促短鸣（A6 1046Hz、末响拔高到 E6 1318Hz），1.5 秒一轮，
+# 共 15 秒，音量逐轮递增。整段结尾与开头音量衔接，循环播放不会有突兀断点。
 SR = 44100
-DURATION = 29.0
+DURATION = 15.0
 TOTAL = int(SR * DURATION)
 samples = [0.0] * TOTAL
-fade = int(SR * 0.008)
 
 
-def beep(start, length, freq, amp=0.42):
-    count = int(SR * length)
+def tone(start, length, freq, amp):
+    """带 2、3 次谐波的短鸣，指数衰减，接近机械闹钟的清脆感"""
     begin = int(start * SR)
-    if begin >= TOTAL:
-        return
-    end = min(begin + count, TOTAL)
-    f = min(fade, (end - begin) // 2)
-    for i in range(begin, end):
-        k = i - begin
-        w = amp * math.sin(2 * math.pi * freq * k / SR)
-        w += 0.25 * amp * math.sin(4 * math.pi * freq * k / SR)
-        if k < f:
-            env = k / f
-        elif end - i <= f:
-            env = (end - i) / f
-        else:
-            env = 1.0
-        samples[i] += w * env
+    count = int(length * SR)
+    attack = max(1, int(0.006 * SR))
+    for i in range(count):
+        idx = begin + i
+        if idx >= TOTAL:
+            break
+        t = i / SR
+        env = i / attack if i < attack else math.exp(-4.0 * (t - 0.006))
+        w = math.sin(2 * math.pi * freq * t)
+        w += 0.45 * math.sin(4 * math.pi * freq * t)
+        w += 0.22 * math.sin(6 * math.pi * freq * t)
+        samples[idx] += amp / 1.67 * env * w
 
 
 t0 = 0.0
+round_index = 0
 while t0 < DURATION:
-    beep(t0, 0.14, 1180)
-    beep(t0 + 0.23, 0.14, 1180)
-    beep(t0 + 0.46, 0.14, 880)
-    t0 += 1.8
+    gain = 0.62 + 0.38 * min(1.0, t0 / DURATION)   # 0.62 → 1.0
+    tone(t0, 0.13, 1046.5, gain)
+    tone(t0 + 0.205, 0.13, 1046.5, gain)
+    tone(t0 + 0.41, 0.20, 1318.5, gain)
+    t0 += 1.5
+    round_index += 1
 
+peak = max(abs(s) for s in samples) or 1.0
+scale = 0.92 / peak if peak > 0.92 else 1.0
 pcm = bytearray()
 for s in samples:
-    v = max(-1.0, min(1.0, s))
+    v = max(-1.0, min(1.0, s * scale))
     pcm += struct.pack("<h", int(v * 32767))
 
 with wave.open(os.path.join(APP_DIR, "alarm.wav"), "wb") as w:
@@ -65,11 +68,13 @@ with wave.open(os.path.join(APP_DIR, "alarm.wav"), "wb") as w:
 
 print("wav", os.path.getsize(os.path.join(APP_DIR, "alarm.wav")), "bytes")
 
-# ------------------------------------------------ notification chime (3 notes)
-# 通知提示音：三音上行（C5-E5-G5），柔和衰减，每 3.5 秒一轮、共 8 轮，共 28 秒，
-# 音量逐轮小幅递增，逼近但仍低于 iOS 通知音 30 秒上限。
+# ------------------------------------------------ notification chime
+# 通知提示音：与前台上行三音不同，改成两短一长的三连鸣（A6-A6-E6），
+# 每 1.75 秒一轮、共 16 轮、28 秒，音量逐轮递增，逼近 iOS 通知音 30 秒上限。
 CHIME_SR = 44100
-CHIME_DUR = 8 * 3.5
+CHIME_CYCLE = 1.75
+CHIME_ROUNDS = 16
+CHIME_DUR = CHIME_CYCLE * CHIME_ROUNDS
 CHIME_N = int(CHIME_SR * CHIME_DUR)
 chime = [0.0] * CHIME_N
 
@@ -77,25 +82,25 @@ chime = [0.0] * CHIME_N
 def chime_note(start, freq, length, amp):
     begin = int(start * CHIME_SR)
     count = int(length * CHIME_SR)
-    attack = int(0.02 * CHIME_SR)
+    attack = max(1, int(0.006 * CHIME_SR))
     for i in range(count):
         idx = begin + i
         if idx >= CHIME_N:
             break
         t = i / CHIME_SR
-        env = i / attack if i < attack else math.exp(-3.0 * (t - 0.02))
+        env = i / attack if i < attack else math.exp(-4.0 * (t - 0.006))
         w = math.sin(2 * math.pi * freq * t)
-        w += 0.22 * math.sin(4 * math.pi * freq * t)
-        w += 0.06 * math.sin(6 * math.pi * freq * t)
-        chime[idx] += amp * env * w
+        w += 0.45 * math.sin(4 * math.pi * freq * t)
+        w += 0.22 * math.sin(6 * math.pi * freq * t)
+        chime[idx] += amp / 1.67 * env * w
 
 
-MOTIF = [(0.00, 523.25, 0.34), (0.18, 659.25, 0.32), (0.36, 783.99, 0.28)]  # C5 E5 G5
-for r in range(8):
-    base = r * 3.5
-    gain = 0.62 + 0.054 * r          # 0.62 → 1.0，逐轮加深存在感
-    for off, freq, amp in MOTIF:
-        chime_note(base + off, freq, 1.6, amp * gain)
+for r in range(CHIME_ROUNDS):
+    base = r * CHIME_CYCLE
+    gain = 0.55 + 0.4 * (r / max(1, CHIME_ROUNDS - 1))     # 0.55 → 0.95
+    chime_note(base, 0.13, 1046.5, gain)
+    chime_note(base + 0.205, 0.13, 1046.5, gain)
+    chime_note(base + 0.41, 0.20, 1318.5, gain)
 
 peak = max(abs(v) for v in chime) or 1.0
 chime_pcm = bytearray()
