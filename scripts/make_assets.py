@@ -65,6 +65,47 @@ with wave.open(os.path.join(APP_DIR, "alarm.wav"), "wb") as w:
 
 print("wav", os.path.getsize(os.path.join(APP_DIR, "alarm.wav")), "bytes")
 
+# ------------------------------------------------ notification chime (3 notes)
+# 通知提示音：三音上行（C5-E5-G5），柔和衰减，约 2.2 秒，不做循环。
+CHIME_SR = 44100
+CHIME_DUR = 2.2
+CHIME_N = int(CHIME_SR * CHIME_DUR)
+chime = [0.0] * CHIME_N
+
+
+def chime_note(start, freq, length, amp):
+    begin = int(start * CHIME_SR)
+    count = int(length * CHIME_SR)
+    attack = int(0.02 * CHIME_SR)
+    for i in range(count):
+        idx = begin + i
+        if idx >= CHIME_N:
+            break
+        t = i / CHIME_SR
+        env = i / attack if i < attack else math.exp(-3.0 * (t - 0.02))
+        w = math.sin(2 * math.pi * freq * t)
+        w += 0.22 * math.sin(4 * math.pi * freq * t)
+        w += 0.06 * math.sin(6 * math.pi * freq * t)
+        chime[idx] += amp * env * w
+
+
+chime_note(0.00, 523.25, 1.5, 0.34)   # C5
+chime_note(0.18, 659.25, 1.5, 0.32)   # E5
+chime_note(0.36, 783.99, 1.5, 0.28)   # G5
+
+peak = max(abs(v) for v in chime) or 1.0
+chime_pcm = bytearray()
+for v in chime:
+    chime_pcm += struct.pack("<h", int(max(-1.0, min(1.0, v / peak * 0.82)) * 32767))
+
+with wave.open(os.path.join(APP_DIR, "chime.wav"), "wb") as w:
+    w.setnchannels(1)
+    w.setsampwidth(2)
+    w.setframerate(CHIME_SR)
+    w.writeframes(bytes(chime_pcm))
+
+print("chime", os.path.getsize(os.path.join(APP_DIR, "chime.wav")), "bytes")
+
 # ---------------------------------------------------------------- app icon
 # Pure-python PNG writer: pill capsule + medical cross badge on dark bg.
 S = 1024
