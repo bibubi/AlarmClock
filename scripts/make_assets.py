@@ -66,10 +66,10 @@ with wave.open(os.path.join(APP_DIR, "alarm.wav"), "wb") as w:
 print("wav", os.path.getsize(os.path.join(APP_DIR, "alarm.wav")), "bytes")
 
 # ------------------------------------------------ notification chime (3 notes)
-# 通知提示音：三音上行（C5-E5-G5），柔和衰减，每 3.6 秒一轮、共 6 轮，约 21.6 秒，
-# 音量逐轮小幅递增，仍在 iOS 通知音 30 秒上限内。
+# 通知提示音：三音上行（C5-E5-G5），柔和衰减，每 3.5 秒一轮、共 8 轮，共 28 秒，
+# 音量逐轮小幅递增，逼近但仍低于 iOS 通知音 30 秒上限。
 CHIME_SR = 44100
-CHIME_DUR = 6 * 3.6
+CHIME_DUR = 8 * 3.5
 CHIME_N = int(CHIME_SR * CHIME_DUR)
 chime = [0.0] * CHIME_N
 
@@ -91,9 +91,9 @@ def chime_note(start, freq, length, amp):
 
 
 MOTIF = [(0.00, 523.25, 0.34), (0.18, 659.25, 0.32), (0.36, 783.99, 0.28)]  # C5 E5 G5
-for r in range(6):
-    base = r * 3.6
-    gain = 0.62 + 0.076 * r          # 0.62 → 1.0，逐轮加深存在感
+for r in range(8):
+    base = r * 3.5
+    gain = 0.62 + 0.054 * r          # 0.62 → 1.0，逐轮加深存在感
     for off, freq, amp in MOTIF:
         chime_note(base + off, freq, 1.6, amp * gain)
 

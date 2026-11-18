@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
     @StateObject private var scheduler = AlarmScheduler.shared
@@ -10,6 +11,11 @@ struct ContentView: View {
     @State private var draftTime = Date()
     @State private var showDateSheet = false
     @State private var draftDate = Date()
+
+    /// 长按标题「吃药提醒」可显示/隐藏测试按钮
+    @AppStorage("med.showTestButton") private var showTestButton = false
+    @State private var testCountdown: Int?
+    @State private var testTask: Task<Void, Never>?
 
     private static let cnDate: DateFormatter = {
         let f = DateFormatter()
@@ -137,10 +143,24 @@ struct ContentView: View {
 
     private var topbar: some View {
         HStack(alignment: .firstTextBaseline) {
-            Text("吃药提醒")
-                .font(.system(size: 13, weight: .semibold))
-                .tracking(3)
-                .foregroundStyle(.white.opacity(0.55))
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("吃药提醒")
+                    .font(.system(size: 13, weight: .semibold))
+                    .tracking(3)
+                    .foregroundStyle(.white.opacity(0.55))
+                    .onLongPressGesture(minimumDuration: 0.7) {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showTestButton.toggle()
+                        }
+                        if !showTestButton { cancelTestCountdown() }
+                        UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+                    }
+
+                if showTestButton {
+                    testButton
+                        .transition(.scale.combined(with: .opacity))
+                }
+            }
 
             Spacer()
 
@@ -153,6 +173,63 @@ struct ContentView: View {
                     .foregroundStyle(.white.opacity(0.55))
             }
         }
+    }
+
+    /// 测试按钮：点一下开始 10 秒倒数，倒数结束立即进入全屏响铃
+    private var testButton: some View {
+        Button {
+            if testCountdown != nil {
+                cancelTestCountdown()
+            } else {
+                startTestCountdown()
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: testCountdown == nil ? "alarm.waves.left.and.right.fill" : "timer")
+                    .font(.system(size: 10, weight: .bold))
+                if let n = testCountdown {
+                    Text("\(n)s")
+                        .font(.system(size: 10, weight: .heavy))
+                        .monospacedDigit()
+                }
+            }
+            .foregroundStyle(testCountdown == nil ? Color.orange : Color.black)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(
+                Capsule().fill(testCountdown == nil ? Color.orange.opacity(0.16) : Color.orange)
+            )
+            .overlay(
+                Capsule().stroke(Color.orange.opacity(testCountdown == nil ? 0.5 : 0), lineWidth: 1)
+            )
+            .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 2 }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func startTestCountdown() {
+        cancelTestCountdown()
+        testCountdown = 10
+        testTask = Task {
+            for n in stride(from: 9, through: 0, by: -1) {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if Task.isCancelled { return }
+                await MainActor.run {
+                    if n == 0 {
+                        testCountdown = nil
+                        scheduler.startTestRinging()
+                    } else {
+                        testCountdown = n
+                    }
+                }
+            }
+        }
+    }
+
+    private func cancelTestCountdown() {
+        testTask?.cancel()
+        testTask = nil
+        testCountdown = nil
     }
 
     // MARK: interval card
@@ -703,10 +780,15 @@ struct RingingView: View {
                 }
 
                 VStack(spacing: 10) {
-                    Text("该吃药了")
+                    Text(scheduler.isTestRing ? "测试提醒" : "该吃药了")
                         .font(.system(size: 30, weight: .bold, design: .rounded))
 
-                    if let dose = scheduler.ringingDose {
+                    if scheduler.isTestRing {
+                        Text("倒数结束已触发 · 本次为测试，不写入服药记录")
+                            .font(.system(size: 14, weight: .medium))
+                            .multilineTextAlignment(.center)
+                            .opacity(0.75)
+                    } else if let dose = scheduler.ringingDose {
                         Text("\(AlarmScheduler.dateText(dose.date)) \(AlarmScheduler.timeText(dose.date)) · \(dose.slot.label)剂")
                             .font(.system(size: 16, weight: .medium))
                             .monospacedDigit()
@@ -718,38 +800,52 @@ struct RingingView: View {
 
                 Spacer()
 
-                Button {
-                    if let dose = scheduler.ringingDose {
-                        Task { await scheduler.record(dose, action: .taken) }
+                if scheduler.isTestRing {
+                    Button {
+                        scheduler.endTestRinging()
+                    } label: {
+                        Text("知道了")
+                            .font(.system(size: 20, weight: .bold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 20)
+                            .background(.white, in: Capsule())
+                            .foregroundStyle(Color(red: 0.58, green: 0.1, blue: 0.06))
                     }
-                } label: {
-                    Text("已服用")
-                        .font(.system(size: 20, weight: .bold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 20)
-                        .background(.white, in: Capsule())
-                        .foregroundStyle(Color(red: 0.58, green: 0.1, blue: 0.06))
-                }
-                .buttonStyle(.plain)
+                    .buttonStyle(.plain)
+                } else {
+                    Button {
+                        if let dose = scheduler.ringingDose {
+                            Task { await scheduler.record(dose, action: .taken) }
+                        }
+                    } label: {
+                        Text("已服用")
+                            .font(.system(size: 20, weight: .bold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 20)
+                            .background(.white, in: Capsule())
+                            .foregroundStyle(Color(red: 0.58, green: 0.1, blue: 0.06))
+                    }
+                    .buttonStyle(.plain)
 
-                Button {
-                    if let dose = scheduler.ringingDose {
-                        Task { await scheduler.snooze(dose) }
+                    Button {
+                        if let dose = scheduler.ringingDose {
+                            Task { await scheduler.snooze(dose) }
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "clock.arrow.circlepath")
+                                .font(.system(size: 15, weight: .semibold))
+                            Text("稍后提醒（10 分钟后）")
+                                .font(.system(size: 16, weight: .semibold))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                        .background(Color.white.opacity(0.14), in: Capsule())
+                        .foregroundStyle(.white.opacity(0.85))
                     }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "clock.arrow.circlepath")
-                            .font(.system(size: 15, weight: .semibold))
-                        Text("稍后提醒（10 分钟后）")
-                            .font(.system(size: 16, weight: .semibold))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 16)
-                    .background(Color.white.opacity(0.14), in: Capsule())
-                    .foregroundStyle(.white.opacity(0.85))
+                    .buttonStyle(.plain)
+                    .padding(.top, 14)
                 }
-                .buttonStyle(.plain)
-                .padding(.top, 14)
             }
             .padding(.horizontal, 40)
             .padding(.bottom, 60)
