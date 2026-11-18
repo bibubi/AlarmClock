@@ -597,7 +597,7 @@ struct ContentView: View {
 
     @ViewBuilder
     private var countdown: some View {
-        if let next = scheduler.nextActionable {
+        if let next = scheduler.nextReminder {
             Text("下次提醒：\(AlarmScheduler.dateText(next.date)) \(AlarmScheduler.weekdayText(next.date)) \(AlarmScheduler.timeText(next.date))")
                 .font(.system(size: 13, weight: .medium))
                 .monospacedDigit()
@@ -734,15 +734,19 @@ struct RingingView: View {
 
                 Button {
                     if let dose = scheduler.ringingDose {
-                        Task { await scheduler.record(dose, action: .skipped) }
+                        Task { await scheduler.snooze(dose) }
                     }
                 } label: {
-                    Text("跳过这次")
-                        .font(.system(size: 16, weight: .semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 16)
-                        .background(Color.white.opacity(0.14), in: Capsule())
-                        .foregroundStyle(.white.opacity(0.85))
+                    HStack(spacing: 6) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 15, weight: .semibold))
+                        Text("稍后提醒（10 分钟后）")
+                            .font(.system(size: 16, weight: .semibold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 16)
+                    .background(Color.white.opacity(0.14), in: Capsule())
+                    .foregroundStyle(.white.opacity(0.85))
                 }
                 .buttonStyle(.plain)
                 .padding(.top, 14)

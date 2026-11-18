@@ -63,7 +63,15 @@ final class AlarmScheduler: ObservableObject {
         static let plan = "med.plan"
         static let alarmIDs = "med.alarmIDs"
         static let records = "med.records"
+        static let snoozeUntil = "med.snoozeUntil"
+        static let snoozeDose = "med.snoozeDose"
+        static let snoozeAlarmID = "med.snoozeAlarmID"
     }
+
+    static let snoozeDuration: TimeInterval = 10 * 60
+    static let snoozeNotificationID = "med.snooze"
+    /// 通知提示音（三音上行，2.2 秒）；随包内 chime.wav 生成
+    static let notificationSound = "chime.wav"
 
     // MARK: settings（修改后自动重建计划）
 
@@ -89,12 +97,15 @@ final class AlarmScheduler: ObservableObject {
     @Published private(set) var plan: [PlannedDose] = []
     @Published private(set) var isRinging = false
     @Published private(set) var ringingDose: PlannedDose?
+    @Published private(set) var snoozedDose: PlannedDose?
+    @Published private(set) var snoozeUntil: Date?
     @Published private(set) var usesSystemAlarm = false
     @Published private(set) var scheduleDescription = ""
     @Published private(set) var errorMessage: String?
 
     private var records: [String: String] = [:]
     private var alarmIDs: [String: String] = [:]   // doseId -> AlarmKit UUID
+    private var snoozeAlarmID: String?
     private var monitor: Timer?
     private var player: AVAudioPlayer?
     private var rebuildTask: Task<Void, Never>?
@@ -138,6 +149,13 @@ final class AlarmScheduler: ObservableObject {
            let decoded = try? JSONDecoder().decode([PlannedDose].self, from: data) {
             plan = decoded
         }
+        if let until = defaults.object(forKey: Keys.snoozeUntil) as? Date,
+           let data = defaults.data(forKey: Keys.snoozeDose),
+           let dose = try? JSONDecoder().decode(PlannedDose.self, from: data) {
+            snoozedDose = dose
+            snoozeUntil = until
+        }
+        snoozeAlarmID = defaults.string(forKey: Keys.snoozeAlarmID)
         pruneRecords()
     }
 
@@ -191,6 +209,16 @@ final class AlarmScheduler: ObservableObject {
         records[dose.id].flatMap(DoseAction.init(rawValue:))
     }
 
+    /// 下一次实际会响铃的剂次与时刻：稍后提醒生效时取稍后时间，否则取下一剂计划时间
+    var nextReminder: (dose: PlannedDose, date: Date)? {
+        if let dose = snoozedDose, let until = snoozeUntil,
+           records[dose.id] == nil, until > Date() {
+            return (dose, until)
+        }
+        guard let dose = nextActionable else { return nil }
+        return (dose, dose.date)
+    }
+
     // MARK: start / stop
 
     func start() async {
@@ -205,9 +233,11 @@ final class AlarmScheduler: ObservableObject {
         rebuildTask = nil
         rebuildGeneration += 1
         await cancelAllScheduled()
+        await cancelSnoozeReminder()
         monitor?.invalidate()
         monitor = nil
         stopRinging()
+        clearSnooze()
         isRunning = false
         defaults.set(false, forKey: Keys.isRunning)
         plan = []
@@ -220,6 +250,9 @@ final class AlarmScheduler: ObservableObject {
         let futureUnrecorded = upcomingDoses.filter { records[$0.id] == nil }.count
         if futureUnrecorded < 16 {
             scheduleRebuild()
+        }
+        if let until = snoozeUntil, until > Date() {
+            await scheduleSnoozeReminder()
         }
         evaluateRinging()
     }
@@ -288,6 +321,10 @@ final class AlarmScheduler: ObservableObject {
         await scheduleAll(upcoming)
         guard generation == rebuildGeneration, !Task.isCancelled else { return }
 
+        // 重建会清空全部已排定提醒，稍后提醒需要重新挂回
+        await scheduleSnoozeReminder()
+        guard generation == rebuildGeneration, !Task.isCancelled else { return }
+
         startMonitor()
         evaluateRinging()
     }
@@ -302,7 +339,7 @@ final class AlarmScheduler: ObservableObject {
                 let manager = AlarmManager.shared
                 for dose in doses {
                     do {
-                        let uuid = try await scheduleAlarmKit(dose, manager: manager)
+                        let uuid = try await scheduleAlarmKit(dose, at: dose.date, manager: manager)
                         alarmIDs[dose.id] = uuid.uuidString
                     } catch {
                         // 单剂排定失败 → 该剂退化为本地通知
@@ -322,7 +359,7 @@ final class AlarmScheduler: ObservableObject {
 
     #if canImport(AlarmKit)
     @available(iOS 26.0, *)
-    private func scheduleAlarmKit(_ dose: PlannedDose, manager: AlarmManager) async throws -> UUID {
+    private func scheduleAlarmKit(_ dose: PlannedDose, at date: Date, manager: AlarmManager) async throws -> UUID {
         let alert = AlarmPresentation.Alert(
             title: "该吃药了",
             stopButton: AlarmButton(
@@ -340,7 +377,7 @@ final class AlarmScheduler: ObservableObject {
 
         let configuration = AlarmManager.AlarmConfiguration(
             countdownDuration: nil,
-            schedule: .fixed(dose.date),
+            schedule: .fixed(date),
             attributes: attributes,
             stopIntent: nil,
             secondaryIntent: nil,
@@ -359,10 +396,91 @@ final class AlarmScheduler: ObservableObject {
         let content = UNMutableNotificationContent()
         content.title = "该吃药了"
         content.body = "\(Self.dateText(dose.date)) \(Self.timeText(dose.date)) · \(dose.slot.label)剂"
-        content.sound = UNNotificationSound(named: UNNotificationSoundName(rawValue: "alarm.wav"))
+        content.sound = UNNotificationSound(named: UNNotificationSoundName(rawValue: Self.notificationSound))
         let trigger = UNTimeIntervalNotificationTrigger(timeInterval: interval, repeats: false)
         let request = UNNotificationRequest(identifier: "med.\(dose.id)", content: content, trigger: trigger)
         try? await UNUserNotificationCenter.current().add(request)
+    }
+
+    // MARK: snooze（稍后提醒）
+
+    /// 稍后提醒：不记录本剂，10 分钟后再次响铃
+    func snooze(_ dose: PlannedDose) async {
+        snoozedDose = dose
+        snoozeUntil = Date().addingTimeInterval(Self.snoozeDuration)
+        persistSnooze()
+        stopRinging()
+        await scheduleSnoozeReminder()
+    }
+
+    private func scheduleSnoozeReminder() async {
+        await cancelSnoozeReminder()
+        guard isRunning,
+              let dose = snoozedDose,
+              let until = snoozeUntil,
+              until.timeIntervalSinceNow > 0.5,
+              records[dose.id] == nil else { return }
+
+        if usesSystemAlarm {
+            #if canImport(AlarmKit)
+            if #available(iOS 26.0, *) {
+                do {
+                    let uuid = try await scheduleAlarmKit(dose, at: until, manager: AlarmManager.shared)
+                    snoozeAlarmID = uuid.uuidString
+                    persistSnooze()
+                    return
+                } catch {
+                    // 系统闹钟排定失败 → 退化为本地通知
+                }
+            }
+            #endif
+        }
+
+        let content = UNMutableNotificationContent()
+        content.title = "该吃药了"
+        content.body = "\(Self.dateText(dose.date)) \(Self.timeText(dose.date)) · \(dose.slot.label)剂 尚未记录"
+        content.sound = UNNotificationSound(named: UNNotificationSoundName(rawValue: Self.notificationSound))
+        let trigger = UNTimeIntervalNotificationTrigger(
+            timeInterval: max(1, until.timeIntervalSinceNow),
+            repeats: false
+        )
+        let request = UNNotificationRequest(
+            identifier: Self.snoozeNotificationID,
+            content: content,
+            trigger: trigger
+        )
+        try? await UNUserNotificationCenter.current().add(request)
+    }
+
+    private func cancelSnoozeReminder() async {
+        UNUserNotificationCenter.current()
+            .removePendingNotificationRequests(withIdentifiers: [Self.snoozeNotificationID])
+        #if canImport(AlarmKit)
+        if #available(iOS 26.0, *) {
+            if let id = snoozeAlarmID, let uuid = UUID(uuidString: id) {
+                try? await AlarmManager.shared.cancel(id: uuid)
+            }
+        }
+        #endif
+        snoozeAlarmID = nil
+        persistSnooze()
+    }
+
+    private func clearSnooze() {
+        snoozedDose = nil
+        snoozeUntil = nil
+        snoozeAlarmID = nil
+        persistSnooze()
+    }
+
+    private func persistSnooze() {
+        defaults.set(snoozeUntil, forKey: Keys.snoozeUntil)
+        if let dose = snoozedDose, let data = encode(dose) {
+            defaults.set(data, forKey: Keys.snoozeDose)
+        } else {
+            defaults.removeObject(forKey: Keys.snoozeDose)
+        }
+        defaults.set(snoozeAlarmID, forKey: Keys.snoozeAlarmID)
     }
 
     private func cancelAllScheduled() async {
@@ -392,6 +510,10 @@ final class AlarmScheduler: ObservableObject {
         pruneRecords()
         persistRecords()
         stopRinging()
+        if snoozedDose?.id == dose.id {
+            await cancelSnoozeReminder()
+            clearSnooze()
+        }
         lastDoseDate = dose.date
         lastDoseSlot = dose.slot
     }
@@ -420,6 +542,18 @@ final class AlarmScheduler: ObservableObject {
     func evaluateRinging() {
         guard isRunning, !isRinging else { return }
         let now = Date()
+
+        // 稍后提醒：等待期内不响铃；到点后再次响铃（同一剂次，仍未记录）
+        if let dose = snoozedDose, let until = snoozeUntil, records[dose.id] == nil {
+            if now < until { return }
+            if now.timeIntervalSince(until) <= Self.activeRingGrace {
+                if usesSystemAlarm { return }
+                startRinging(dose)
+                return
+            }
+            clearSnooze()
+        }
+
         guard let dose = plan.first(where: {
             records[$0.id] == nil
                 && now >= $0.date
