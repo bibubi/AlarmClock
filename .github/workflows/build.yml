@@ -22,6 +22,13 @@ jobs:
           sudo xcode-select -s "$LATEST_XCODE"
           xcodebuild -version
 
+      - name: Remove duplicate stale sources
+        run: |
+          # 仓库里残留的 AlarmClock/AlarmClock/ 是旧副本，会被同步文件夹重复编译，
+          # 导致 "Multiple commands produce ...stringsdata"，构建前清掉
+          rm -rf AlarmClock/AlarmClock
+          find AlarmClock -name "*.swift" | sort
+
       - name: Generate sound and icon assets
         run: python3 scripts/make_assets.py
 
